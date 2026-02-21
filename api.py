@@ -36,11 +36,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Loaded at startup
+# Loaded lazily (or at startup if all files present)
 _model = None
 _feature_cols: list[str] = []
 _predictions_df: Optional[pd.DataFrame] = None
 _tables_cache: Optional[dict] = None
+_artifacts_error: Optional[str] = None  # Set when load fails so we can return 503 with message
 
 
 def _ensure_utc(series: pd.Series) -> pd.Series:
@@ -51,23 +52,34 @@ def _ensure_utc(series: pd.Series) -> pd.Series:
 
 
 def _load_artifacts() -> None:
-    global _model, _feature_cols, _predictions_df
+    global _model, _feature_cols, _predictions_df, _artifacts_error
     if _model is not None:
+        return
+    if _artifacts_error is not None:
         return
     model_path = ARTIFACTS_DIR / "model.pkl"
     feature_path = ARTIFACTS_DIR / "feature_list.json"
     pred_path = ARTIFACTS_DIR / "predictions.parquet"
     if not model_path.exists():
-        raise FileNotFoundError(f"Model not found: {model_path}. Run the pipeline first.")
+        _artifacts_error = f"Model not found: {model_path}. Run the pipeline and include output_full_run in the image."
+        return
     if not feature_path.exists():
-        raise FileNotFoundError(f"Feature list not found: {feature_path}")
+        _artifacts_error = f"Feature list not found: {feature_path}"
+        return
     if not pred_path.exists():
-        raise FileNotFoundError(f"Predictions not found: {pred_path}. Run the pipeline first.")
-    _model = joblib.load(model_path)
-    import json
-    with open(feature_path) as f:
-        _feature_cols = json.load(f)
-    _predictions_df = pd.read_parquet(pred_path)
+        _artifacts_error = (
+            f"Predictions not found: {pred_path}. Run the pipeline and add output_full_run/predictions.parquet to the image."
+        )
+        return
+    try:
+        _model = joblib.load(model_path)
+        import json
+        with open(feature_path) as f:
+            _feature_cols = json.load(f)
+        _predictions_df = pd.read_parquet(pred_path)
+    except Exception as e:
+        _artifacts_error = f"Failed to load artifacts: {e}"
+        return
     # Normalize timestamp for lookups
     if _predictions_df["timestamp"].dt.tz is None:
         _predictions_df["timestamp"] = _predictions_df["timestamp"].dt.tz_localize("UTC", ambiguous="infer")
@@ -95,9 +107,10 @@ def _load_tables() -> dict:
     return _tables_cache
 
 
-@app.on_event("startup")
-def startup() -> None:
-    _load_artifacts()
+@app.get("/health")
+def health() -> dict[str, str]:
+    """Liveness/readiness: app is up. Does not load artifacts (so deploy succeeds even if parquet is missing)."""
+    return {"status": "ok"}
 
 
 @app.get("/")
@@ -113,6 +126,8 @@ def list_patients(
 ) -> list[dict[str, Any]]:
     """List hospitalizations with latest timestamp and risk_score. Optional search by hospitalization_id or patient_id."""
     _load_artifacts()
+    if _predictions_df is None:
+        raise HTTPException(status_code=503, detail=_artifacts_error or "Artifacts not loaded.")
     df = _predictions_df.copy()
     # Latest row per hospitalization (by timestamp)
     idx = df.groupby("hospitalization_id")["timestamp"].idxmax()
@@ -233,6 +248,8 @@ def explain(
     also returns top_drivers (SHAP) and timeseries. Without CLIF, returns empty drivers/timeseries.
     """
     _load_artifacts()
+    if _predictions_df is None:
+        raise HTTPException(status_code=503, detail=_artifacts_error or "Artifacts not loaded.")
     try:
         ts = pd.to_datetime(timestamp, utc=True)
     except Exception as e:
@@ -352,4 +369,5 @@ def explain(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", "8000"))
+    uvicorn.run(app, host="0.0.0.0", port=port)

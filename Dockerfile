@@ -16,4 +16,5 @@ ENV DETECTORATE_ARTIFACTS_DIR=/app/output_full_run
 
 EXPOSE 8000
 ENV PORT=8000
-CMD ["/bin/sh", "-c", "uvicorn api:app --host 0.0.0.0 --port ${PORT}"]
+# Start via Python so PORT is read from env (Railway may not expand $PORT in Procfile)
+CMD ["python", "api.py"]
