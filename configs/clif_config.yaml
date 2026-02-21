@@ -1,0 +1,13 @@
+# CLIF config for clifpy (load_config / get_config_or_params).
+# Required: data_directory (or tables_path in YAML → mapped to data_directory), filetype, timezone.
+# Tables are loaded as: <data_directory>/clif_<table_name>.<filetype>
+# See: clifpy.utils.config._load_config_file, load_config; clifpy.utils.io.load_data
+
+# Path to CLIF-MIMIC Release 1.0.0 parquet directory
+# Directory name has no closing paren: "Release 1.0.0 (MIMIC-IV 3.1 - CLIF 2"
+data_directory: "/Users/adambizios/Downloads/CLIF-MIMIC/Release 1.0.0 (MIMIC-IV 3.1 - CLIF 2"
+filetype: "parquet"
+timezone: "UTC"
+
+# Optional; used by some clifpy helpers
+# output_directory: "output"
