@@ -18,5 +18,5 @@ __pycache__/
 *.swp
 *.swo
 
-# Optional: exclude large artifacts (uncomment to avoid pushing model + predictions)
-# output_full_run/
+# Large artifacts (push once; ignore future changes to avoid >50MB warnings)
+output_full_run/predictions.parquet
