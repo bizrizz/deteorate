@@ -219,22 +219,24 @@ def _get_timeseries_for_window(
     return out
 
 
+def _empty_timeseries() -> dict[str, list]:
+    return {"hr": [], "map": [], "spo2": [], "fio2": [], "peep": [], "lactate": [], "creatinine": []}
+
+
 @app.get("/explain")
 def explain(
     hospitalization_id: str = Query(..., description="Hospitalization ID"),
     timestamp: str = Query(..., description="Window end time (ISO)"),
 ) -> dict[str, Any]:
     """
-    Explain one window: load row from predictions, reconstruct features (6h lookback),
-    compute SHAP for that row, return top drivers and timeseries for charting.
+    Explain one window: risk_score and label from predictions; if CLIF_DATA_DIR is set,
+    also returns top_drivers (SHAP) and timeseries. Without CLIF, returns empty drivers/timeseries.
     """
     _load_artifacts()
-    # Parse timestamp and find row in predictions
     try:
         ts = pd.to_datetime(timestamp, utc=True)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid timestamp: {e}")
-    # Match by hospitalization_id and timestamp (exact or same hour)
     pred = _predictions_df[
         (_predictions_df["hospitalization_id"].astype(str) == str(hospitalization_id))
         & (_predictions_df["timestamp"] == ts)
@@ -252,8 +254,35 @@ def explain(
     risk_score = float(row["risk_score"])
     label = int(row["label"])
 
-    # Reconstruct features for this window (same feature engineering)
-    tables = _load_tables()
+    # If CLIF not available, return prediction only (no SHAP/timeseries)
+    if not CLIF_DATA_DIR or not Path(CLIF_DATA_DIR).is_dir():
+        return {
+            "hospitalization_id": hospitalization_id,
+            "patient_id": patient_id,
+            "timestamp": ts.isoformat(),
+            "risk_score": risk_score,
+            "label": label,
+            "top_drivers": [],
+            "timeseries": _empty_timeseries(),
+            "explain_available": False,
+            "message": "SHAP and timeseries require CLIF_DATA_DIR. Run API locally with CLIF data for full explain.",
+        }
+
+    try:
+        tables = _load_tables()
+    except HTTPException:
+        return {
+            "hospitalization_id": hospitalization_id,
+            "patient_id": patient_id,
+            "timestamp": ts.isoformat(),
+            "risk_score": risk_score,
+            "label": label,
+            "top_drivers": [],
+            "timeseries": _empty_timeseries(),
+            "explain_available": False,
+            "message": "CLIF data could not be loaded. Risk and label from predictions only.",
+        }
+
     from feature_engineering import build_all_features
 
     grid = pd.DataFrame([{
@@ -271,8 +300,17 @@ def explain(
         lookback_hours=6.0,
     )
     if X_row.empty:
-        raise HTTPException(status_code=404, detail="Could not build features for this window (no data in lookback).")
-    # Align to feature list and convert to float for model/SHAP
+        return {
+            "hospitalization_id": hospitalization_id,
+            "patient_id": patient_id,
+            "timestamp": ts.isoformat(),
+            "risk_score": risk_score,
+            "label": label,
+            "top_drivers": [],
+            "timeseries": _empty_timeseries(),
+            "explain_available": False,
+            "message": "No feature data in lookback window.",
+        }
     for c in _feature_cols:
         if c not in X_row.columns:
             X_row[c] = np.nan
@@ -281,14 +319,12 @@ def explain(
         X_f[c] = pd.to_numeric(X_f[c], errors="coerce")
     X_f = X_f.astype(np.float64).fillna(0.0)
 
-    # SHAP for single row (use row as background)
     explainer = shap.TreeExplainer(_model, X_f, feature_perturbation="interventional")
     shap_vals = explainer.shap_values(X_f)
     if isinstance(shap_vals, list):
         shap_vals = shap_vals[1]
     shap_row = np.asarray(shap_vals).flatten()
 
-    # Top drivers: sort by |shap|, return feature, value, shap, direction
     order = np.argsort(-np.abs(shap_row))[:15]
     top_drivers = []
     for i in order:
@@ -300,7 +336,6 @@ def explain(
         direction = "increases_risk" if s > 0 else "decreases_risk" if s < 0 else "neutral"
         top_drivers.append({"feature": feat, "value": val, "shap": round(s, 6), "direction": direction})
 
-    # Timeseries from raw CLIF (last 6h)
     timeseries = _get_timeseries_for_window(hospitalization_id, ts, lookback_hours=6.0)
 
     return {
@@ -311,6 +346,7 @@ def explain(
         "label": label,
         "top_drivers": top_drivers,
         "timeseries": timeseries,
+        "explain_available": True,
     }
 
 
