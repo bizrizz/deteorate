@@ -1,6 +1,6 @@
 # Stage 0: clone repo and pull Git LFS so we get real clif_data (Railway build context has only LFS pointers)
-ARG REPO_URL=https://github.com/bizrizz/deteorate.git
 FROM alpine:3.19 AS lfs
+ARG REPO_URL=https://github.com/bizrizz/deteorate.git
 RUN apk add --no-cache git git-lfs && git lfs install
 WORKDIR /repo
 RUN git clone --depth 1 "${REPO_URL}" . && git lfs pull
