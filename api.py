@@ -43,6 +43,11 @@ _predictions_df: Optional[pd.DataFrame] = None
 _tables_cache: Optional[dict] = None
 _artifacts_error: Optional[str] = None  # Set when load fails so we can return 503 with message
 
+# Cache full /explain responses by (hospitalization_id, timestamp_iso) to avoid slow repeat loads
+_explain_cache: dict[tuple[str, str], dict[str, Any]] = {}
+_explain_cache_keys: list[tuple[str, str]] = []  # FIFO order for eviction
+_EXPLAIN_CACHE_MAX = 100
+
 
 def _ensure_utc(series: pd.Series) -> pd.Series:
     if pd.api.types.is_datetime64_any_dtype(series):
@@ -123,8 +128,11 @@ def root() -> dict[str, str]:
 def list_patients(
     limit: int = Query(50, ge=1, le=500),
     search: Optional[str] = Query(None),
+    risk_min: Optional[float] = Query(None, ge=0.0, le=1.0, description="Minimum risk_score (0–1) inclusive"),
+    risk_max: Optional[float] = Query(None, ge=0.0, le=1.0, description="Maximum risk_score (0–1) inclusive"),
+    sort_asc: bool = Query(False, description="If true, sort by risk ascending (lowest risk first)"),
 ) -> list[dict[str, Any]]:
-    """List hospitalizations with latest timestamp and risk_score. Optional search by hospitalization_id or patient_id."""
+    """List hospitalizations with latest timestamp and risk_score. Optional search, risk filter, and sort order."""
     _load_artifacts()
     if _predictions_df is None:
         raise HTTPException(status_code=503, detail=_artifacts_error or "Artifacts not loaded.")
@@ -139,7 +147,11 @@ def list_patients(
             | latest["patient_id"].astype(str).str.lower().str.contains(q, na=False)
         )
         latest = latest[mask]
-    latest = latest.sort_values("risk_score", ascending=False).head(limit)
+    if risk_min is not None:
+        latest = latest[latest["risk_score"] >= risk_min]
+    if risk_max is not None:
+        latest = latest[latest["risk_score"] <= risk_max]
+    latest = latest.sort_values("risk_score", ascending=sort_asc).head(limit)
     return [
         {
             "hospitalization_id": str(row["hospitalization_id"]),
@@ -271,6 +283,11 @@ def explain(
     risk_score = float(row["risk_score"])
     label = int(row["label"])
 
+    ts_iso = ts.isoformat()
+    cache_key = (str(hospitalization_id), ts_iso)
+    if cache_key in _explain_cache:
+        return _explain_cache[cache_key]
+
     # If CLIF not available, return prediction only (no SHAP/timeseries)
     if not CLIF_DATA_DIR or not Path(CLIF_DATA_DIR).is_dir():
         return {
@@ -355,16 +372,25 @@ def explain(
 
     timeseries = _get_timeseries_for_window(hospitalization_id, ts, lookback_hours=6.0)
 
-    return {
+    result = {
         "hospitalization_id": hospitalization_id,
         "patient_id": patient_id,
-        "timestamp": ts.isoformat(),
+        "timestamp": ts_iso,
         "risk_score": risk_score,
         "label": label,
         "top_drivers": top_drivers,
         "timeseries": timeseries,
         "explain_available": True,
     }
+    # Cache so repeat requests for same window are fast
+    global _explain_cache, _explain_cache_keys
+    if cache_key not in _explain_cache:
+        while len(_explain_cache_keys) >= _EXPLAIN_CACHE_MAX:
+            old = _explain_cache_keys.pop(0)
+            _explain_cache.pop(old, None)
+        _explain_cache[cache_key] = result
+        _explain_cache_keys.append(cache_key)
+    return result
 
 
 if __name__ == "__main__":
