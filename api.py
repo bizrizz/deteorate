@@ -259,6 +259,7 @@ def explain(
     Explain one window: risk_score and label from predictions; if CLIF_DATA_DIR is set,
     also returns top_drivers (SHAP) and timeseries. Without CLIF, returns empty drivers/timeseries.
     """
+    global _explain_cache, _explain_cache_keys
     _load_artifacts()
     if _predictions_df is None:
         raise HTTPException(status_code=503, detail=_artifacts_error or "Artifacts not loaded.")
@@ -383,7 +384,6 @@ def explain(
         "explain_available": True,
     }
     # Cache so repeat requests for same window are fast
-    global _explain_cache, _explain_cache_keys
     if cache_key not in _explain_cache:
         while len(_explain_cache_keys) >= _EXPLAIN_CACHE_MAX:
             old = _explain_cache_keys.pop(0)
